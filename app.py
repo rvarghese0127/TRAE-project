@@ -1,11 +1,14 @@
 """
-ARR Risk Attribution Dashboard
-==============================
-A production-grade Streamlit dashboard for customer churn risk attribution and root-cause analysis.
-Designed with a dark theme, modern SaaS aesthetics, and interactive data exploration.
+ChurnGuard: AI-Powered ARR Risk & Retention Dashboard
+======================================================
+Production-grade Streamlit dashboard with:
+- Dual data ingestion (CSV uploads + API connections)
+- Salesforce, Amplitude, Zendesk integrations
+- Claude AI-powered churn analysis and retention recommendations
+- Dark theme with modern SaaS aesthetics
 
 Author: Claude (Anthropic)
-Version: 1.0.0
+Version: 2.0.0
 """
 
 import streamlit as st
@@ -14,10 +17,40 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import random
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
+import json
+import time
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, asdict
 from enum import Enum
+import hashlib
+import os
+
+# =============================================================================
+# OPTIONAL IMPORTS (graceful fallback if not installed)
+# =============================================================================
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    anthropic = None
+
+try:
+    from simple_salesforce import Salesforce
+    SALESFORCE_AVAILABLE = True
+except ImportError:
+    SALESFORCE_AVAILABLE = False
+    Salesforce = None
+
+try:
+    from zenpy import Zenpy
+    ZENDESK_AVAILABLE = True
+except ImportError:
+    ZENDESK_AVAILABLE = False
+    Zenpy = None
+
+import requests  # For Amplitude API
 
 # =============================================================================
 # CONFIGURATION & CONSTANTS
@@ -41,9 +74,10 @@ class Benchmark:
     support_tickets_threshold: int = 3
     nps_score: float = 8.0
 
-BENCHMARKS = Benchmark()
+# Default benchmarks
+DEFAULT_BENCHMARKS = Benchmark()
 
-# Risk category weights (sum to 1.0)
+# Risk category weights
 RISK_WEIGHTS = {
     "product": 0.30,
     "process": 0.25,
@@ -71,34 +105,25 @@ COLORS = {
 # =============================================================================
 
 def inject_custom_css():
-    """Inject custom CSS for dark theme and card styling."""
+    """Inject custom CSS for dark theme and professional styling."""
     st.markdown("""
     <style>
-        /* Import Google Fonts */
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap');
         
-        /* Global styles */
         .stApp {
             background-color: #0e1117;
             font-family: 'Outfit', sans-serif;
         }
         
-        /* Hide Streamlit branding */
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
         header {visibility: hidden;}
         
-        /* Sidebar styling */
         [data-testid="stSidebar"] {
             background-color: #0a0c10;
             border-right: 1px solid #1f2937;
         }
         
-        [data-testid="stSidebar"] .stMarkdown {
-            color: #e5e7eb;
-        }
-        
-        /* Custom card component */
         .risk-card {
             background: linear-gradient(145deg, #1a1d24 0%, #141720 100%);
             border: 1px solid #2d3139;
@@ -176,20 +201,6 @@ def inject_custom_css():
             margin-top: 4px;
         }
         
-        .metric-delta {
-            font-size: 0.9rem;
-            font-weight: 500;
-            margin-left: 8px;
-        }
-        
-        .metric-delta-negative {
-            color: #ff4d4d;
-        }
-        
-        .metric-delta-positive {
-            color: #26de81;
-        }
-        
         .benchmark-text {
             font-size: 0.8rem;
             color: #6b7280;
@@ -213,11 +224,6 @@ def inject_custom_css():
             background: #ff9f43;
         }
         
-        .score-dot-green {
-            background: #26de81;
-        }
-        
-        /* Sub-card for nested metrics */
         .sub-card {
             background: rgba(0, 0, 0, 0.3);
             border: 1px solid #252830;
@@ -240,7 +246,6 @@ def inject_custom_css():
             color: #ffffff;
         }
         
-        /* Header styles */
         .dashboard-header {
             background: linear-gradient(135deg, #1a1d24 0%, #0e1117 100%);
             border: 1px solid #2d3139;
@@ -262,138 +267,100 @@ def inject_custom_css():
             color: #8b949e;
         }
         
-        /* Navigation pills */
-        .nav-pill {
-            display: inline-flex;
-            align-items: center;
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            color: #8b949e;
-            text-decoration: none;
-            transition: all 0.2s ease;
-            cursor: pointer;
-            margin-right: 4px;
+        .ai-insight-card {
+            background: linear-gradient(135deg, #1a1d24 0%, #0f1419 100%);
+            border: 1px solid #2d3139;
+            border-left: 4px solid #54a0ff;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 12px 0;
         }
         
-        .nav-pill:hover {
-            background: rgba(255, 255, 255, 0.05);
+        .ai-insight-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        
+        .ai-insight-title {
+            font-size: 1.1rem;
+            font-weight: 600;
             color: #ffffff;
         }
         
-        .nav-pill-active {
-            background: rgba(84, 160, 255, 0.15);
-            color: #54a0ff;
-            border: 1px solid rgba(84, 160, 255, 0.3);
+        .ai-insight-content {
+            color: #d1d5db;
+            line-height: 1.6;
         }
         
-        /* Button styles */
-        .action-button {
+        .pain-point {
+            background: rgba(255, 77, 77, 0.1);
+            border-left: 3px solid #ff4d4d;
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .recommendation {
+            background: rgba(38, 222, 129, 0.1);
+            border-left: 3px solid #26de81;
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .impact-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+        
+        .impact-high {
+            background: rgba(38, 222, 129, 0.2);
+            color: #26de81;
+        }
+        
+        .impact-medium {
+            background: rgba(255, 159, 67, 0.2);
+            color: #ff9f43;
+        }
+        
+        .connection-status {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 10px 20px;
-            border-radius: 10px;
-            font-size: 0.9rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            border: none;
-        }
-        
-        .btn-primary {
-            background: linear-gradient(135deg, #54a0ff 0%, #2e86de 100%);
-            color: #ffffff;
-        }
-        
-        .btn-primary:hover {
-            box-shadow: 0 4px 15px rgba(84, 160, 255, 0.4);
-            transform: translateY(-1px);
-        }
-        
-        .btn-secondary {
-            background: rgba(255, 255, 255, 0.05);
-            color: #d1d5db;
-            border: 1px solid #3d4149;
-        }
-        
-        .btn-secondary:hover {
-            background: rgba(255, 255, 255, 0.1);
-        }
-        
-        /* Count badge */
-        .count-badge {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 24px;
-            height: 24px;
+            padding: 4px 10px;
             border-radius: 6px;
-            background: rgba(255, 159, 67, 0.15);
-            color: #ff9f43;
             font-size: 0.8rem;
-            font-weight: 600;
-            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
         }
         
-        /* Progress bar */
-        .progress-bar-container {
-            width: 100%;
-            height: 6px;
-            background: #1a1d24;
-            border-radius: 3px;
-            margin-top: 8px;
-            overflow: hidden;
+        .status-connected {
+            background: rgba(38, 222, 129, 0.15);
+            color: #26de81;
         }
         
-        .progress-bar-fill {
-            height: 100%;
-            border-radius: 3px;
-            transition: width 0.5s ease;
+        .status-disconnected {
+            background: rgba(255, 77, 77, 0.15);
+            color: #ff4d4d;
         }
         
-        /* Section divider */
         .section-divider {
             height: 1px;
             background: linear-gradient(90deg, transparent 0%, #3d4149 50%, transparent 100%);
             margin: 24px 0;
         }
         
-        /* Tooltip */
-        .tooltip-container {
-            position: relative;
-            display: inline-block;
-        }
-        
-        .tooltip-text {
-            visibility: hidden;
-            background: #1a1d24;
-            color: #d1d5db;
-            font-size: 0.8rem;
-            padding: 8px 12px;
-            border-radius: 8px;
-            border: 1px solid #3d4149;
-            position: absolute;
-            z-index: 100;
-            bottom: 125%;
-            left: 50%;
-            transform: translateX(-50%);
-            white-space: nowrap;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-        }
-        
-        .tooltip-container:hover .tooltip-text {
-            visibility: visible;
-        }
-        
-        /* Streamlit overrides */
-        .stSelectbox > div > div {
-            background-color: #1a1d24;
-            border-color: #3d4149;
-        }
-        
-        .stSlider > div > div > div {
-            background-color: #54a0ff;
+        .api-input-container {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid #2d3139;
+            border-radius: 12px;
+            padding: 16px;
+            margin: 12px 0;
         }
         
         div[data-testid="stExpander"] {
@@ -419,7 +386,6 @@ def inject_custom_css():
             color: #54a0ff;
         }
         
-        /* Animation */
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
@@ -429,41 +395,71 @@ def inject_custom_css():
             animation: fadeIn 0.4s ease forwards;
         }
         
-        /* Responsive adjustments */
-        @media (max-width: 768px) {
-            .risk-card {
-                padding: 16px;
-            }
-            .metric-value {
-                font-size: 1.6rem;
-            }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .loading-pulse {
+            animation: pulse 1.5s ease-in-out infinite;
         }
     </style>
     """, unsafe_allow_html=True)
 
 # =============================================================================
-# DATA GENERATION
+# AUTHENTICATION (Simple Password-Based)
 # =============================================================================
 
-@st.cache_data
-def generate_sample_data(n_accounts: int = 300, seed: int = 42) -> pd.DataFrame:
+def check_password() -> bool:
     """
-    Generate realistic sample customer data for the dashboard.
+    Simple password authentication.
+    For production, use Streamlit-Authenticator or OAuth.
+    """
+    # Check if already authenticated
+    if st.session_state.get("authenticated", False):
+        return True
     
-    Args:
-        n_accounts: Number of customer accounts to generate
-        seed: Random seed for reproducibility
+    # Try to get password from secrets first
+    try:
+        correct_password = st.secrets.get("APP_PASSWORD", "churnguard2024")
+    except:
+        correct_password = "churnguard2024"  # Default for demo
+    
+    st.markdown("""
+    <div style="max-width: 400px; margin: 100px auto; text-align: center;">
+        <h1 style="color: #ffffff; font-family: 'Outfit', sans-serif;">🛡️ ChurnGuard</h1>
+        <p style="color: #8b949e;">AI-Powered ARR Risk & Retention Dashboard</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        password = st.text_input("Enter password to access dashboard", type="password", key="password_input")
+        if st.button("Login", use_container_width=True, type="primary"):
+            if hashlib.sha256(password.encode()).hexdigest() == hashlib.sha256(correct_password.encode()).hexdigest():
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("❌ Incorrect password")
         
-    Returns:
-        DataFrame with customer metrics and churn indicators
-    """
+        st.markdown("""
+        <p style="color: #6b7280; font-size: 0.8rem; margin-top: 20px; text-align: center;">
+            Demo password: <code>churnguard2024</code>
+        </p>
+        """, unsafe_allow_html=True)
+    
+    return False
+
+# =============================================================================
+# DATA LOADING FUNCTIONS
+# =============================================================================
+
+def generate_sample_data(n_accounts: int = 300, seed: int = 42) -> pd.DataFrame:
+    """Generate realistic sample customer data."""
     np.random.seed(seed)
-    random.seed(seed)
     
     regions = ["AMER", "EMEA", "APAC"]
     region_weights = [0.45, 0.35, 0.20]
-    
-    # Industry segments for realism
     industries = ["Technology", "Healthcare", "Finance", "Retail", "Manufacturing", "Education"]
     company_sizes = ["SMB", "Mid-Market", "Enterprise"]
     
@@ -475,121 +471,378 @@ def generate_sample_data(n_accounts: int = 300, seed: int = 42) -> pd.DataFrame:
         "company_size": np.random.choice(company_sizes, n_accounts, p=[0.5, 0.35, 0.15]),
         "arr_value": np.random.lognormal(mean=10.5, sigma=1.2, size=n_accounts).astype(int) * 100,
         "contract_start_date": [
-            datetime.now() - timedelta(days=np.random.randint(30, 730)) 
+            (datetime.now() - timedelta(days=np.random.randint(30, 730))).strftime("%Y-%m-%d")
             for _ in range(n_accounts)
         ],
         "renewal_date": [
-            datetime.now() + timedelta(days=np.random.randint(-30, 365)) 
+            (datetime.now() + timedelta(days=np.random.randint(-30, 365))).strftime("%Y-%m-%d")
             for _ in range(n_accounts)
         ],
     }
     
     df = pd.DataFrame(data)
     
-    # Generate correlated metrics (customers with poor adoption tend to have poor engagement)
-    base_health = np.random.beta(5, 2, n_accounts)  # Base health score (0-1)
+    # Generate correlated metrics
+    base_health = np.random.beta(5, 2, n_accounts)
     
     df["core_module_adoption"] = np.clip(base_health * np.random.uniform(0.7, 1.3, n_accounts), 0.15, 1.0)
     df["onboarding_completion_pct"] = np.clip(base_health * np.random.uniform(0.8, 1.2, n_accounts), 0.2, 1.0)
-    df["weekly_logins"] = np.clip(
-        (base_health * 10 * np.random.uniform(0.5, 1.5, n_accounts)).astype(int), 
-        0, 20
-    )
-    df["time_to_first_value_days"] = np.clip(
-        ((1 - base_health) * 45 + np.random.normal(0, 5, n_accounts)).astype(int),
-        3, 90
-    )
+    df["weekly_logins"] = np.clip((base_health * 10 * np.random.uniform(0.5, 1.5, n_accounts)).astype(int), 0, 20)
+    df["time_to_first_value_days"] = np.clip(((1 - base_health) * 45 + np.random.normal(0, 5, n_accounts)).astype(int), 3, 90)
     df["seat_utilization_pct"] = np.clip(base_health * np.random.uniform(0.6, 1.2, n_accounts), 0.1, 1.0)
     df["feature_adoption_score"] = np.clip(base_health * np.random.uniform(0.7, 1.2, n_accounts), 0.1, 1.0)
-    df["support_tickets_last_quarter"] = np.clip(
-        ((1 - base_health) * 8 + np.random.poisson(2, n_accounts)).astype(int),
-        0, 20
-    )
-    df["nps_score"] = np.clip(
-        (base_health * 10 + np.random.normal(0, 1.5, n_accounts)),
-        0, 10
-    )
+    df["support_tickets_last_quarter"] = np.clip(((1 - base_health) * 8 + np.random.poisson(2, n_accounts)).astype(int), 0, 20)
+    df["nps_score"] = np.clip((base_health * 10 + np.random.normal(0, 1.5, n_accounts)), 0, 10)
     df["csm_engagement_score"] = np.clip(base_health * np.random.uniform(0.6, 1.3, n_accounts), 0.2, 1.0)
     df["training_completion_pct"] = np.clip(base_health * np.random.uniform(0.5, 1.2, n_accounts), 0.1, 1.0)
-    df["api_integration_count"] = np.clip(
-        (base_health * 8 * np.random.uniform(0.3, 1.5, n_accounts)).astype(int),
-        0, 15
-    )
-    df["days_since_last_login"] = np.clip(
-        ((1 - base_health) * 30 + np.random.exponential(5, n_accounts)).astype(int),
-        0, 90
-    )
-    
-    # Calculate churn probability based on metrics
-    churn_score = (
-        (BENCHMARKS.core_module_adoption - df["core_module_adoption"]) * 0.25 +
-        (BENCHMARKS.onboarding_completion - df["onboarding_completion_pct"]) * 0.15 +
-        (BENCHMARKS.weekly_logins - df["weekly_logins"]) / BENCHMARKS.weekly_logins * 0.15 +
-        (df["time_to_first_value_days"] - BENCHMARKS.time_to_first_value_days) / 30 * 0.15 +
-        (BENCHMARKS.seat_utilization - df["seat_utilization_pct"]) * 0.15 +
-        (df["support_tickets_last_quarter"] / 10) * 0.15
-    )
-    
-    churn_prob = 1 / (1 + np.exp(-churn_score * 3))  # Sigmoid transformation
-    df["churn_probability"] = churn_prob
-    df["churned"] = np.random.random(n_accounts) < churn_prob
-    
-    # Risk tier assignment
-    df["risk_tier"] = pd.cut(
-        df["churn_probability"],
-        bins=[0, 0.3, 0.6, 1.0],
-        labels=["Low", "Medium", "High"]
-    )
+    df["api_integration_count"] = np.clip((base_health * 8 * np.random.uniform(0.3, 1.5, n_accounts)).astype(int), 0, 15)
+    df["days_since_last_login"] = np.clip(((1 - base_health) * 30 + np.random.exponential(5, n_accounts)).astype(int), 0, 90)
+    df["escalation_count"] = np.clip(((1 - base_health) * 3 + np.random.poisson(0.5, n_accounts)).astype(int), 0, 10)
+    df["avg_ticket_resolution_hours"] = np.clip(((1 - base_health) * 48 + np.random.exponential(12, n_accounts)), 1, 168)
     
     return df
+
+def load_csv_data(salesforce_file, amplitude_file, zendesk_file) -> Optional[pd.DataFrame]:
+    """
+    Load and merge data from uploaded CSV files.
+    
+    Expected columns:
+    - Salesforce: account_id, company_name, region, arr_value, industry, company_size
+    - Amplitude: account_id, weekly_logins, core_module_adoption, seat_utilization_pct, feature_adoption_score, time_to_first_value_days
+    - Zendesk: account_id, support_tickets_last_quarter, escalation_count, avg_ticket_resolution_hours, nps_score
+    """
+    try:
+        # Load each file
+        sf_df = pd.read_csv(salesforce_file) if salesforce_file else None
+        amp_df = pd.read_csv(amplitude_file) if amplitude_file else None
+        zd_df = pd.read_csv(zendesk_file) if zendesk_file else None
+        
+        # Start with Salesforce as base (required)
+        if sf_df is None:
+            st.error("Salesforce data is required as the base dataset")
+            return None
+        
+        merged_df = sf_df.copy()
+        
+        # Merge Amplitude data
+        if amp_df is not None and 'account_id' in amp_df.columns:
+            merged_df = merged_df.merge(amp_df, on='account_id', how='left', suffixes=('', '_amp'))
+        
+        # Merge Zendesk data
+        if zd_df is not None and 'account_id' in zd_df.columns:
+            merged_df = merged_df.merge(zd_df, on='account_id', how='left', suffixes=('', '_zd'))
+        
+        # Fill missing values with reasonable defaults
+        numeric_cols = merged_df.select_dtypes(include=[np.number]).columns
+        merged_df[numeric_cols] = merged_df[numeric_cols].fillna(merged_df[numeric_cols].median())
+        
+        return merged_df
+    
+    except Exception as e:
+        st.error(f"Error loading CSV files: {str(e)}")
+        return None
+
+def load_salesforce_data(username: str, password: str, security_token: str, domain: str = 'login') -> Optional[pd.DataFrame]:
+    """
+    Load account data from Salesforce via API.
+    
+    Requires simple-salesforce library.
+    """
+    if not SALESFORCE_AVAILABLE:
+        st.error("simple-salesforce library not installed. Run: pip install simple-salesforce")
+        return None
+    
+    try:
+        sf = Salesforce(
+            username=username,
+            password=password,
+            security_token=security_token,
+            domain=domain
+        )
+        
+        # SOQL query for account data with ARR
+        query = """
+        SELECT Id, Name, BillingCountry, Industry, AnnualRevenue, 
+               NumberOfEmployees, Type, CreatedDate
+        FROM Account 
+        WHERE AnnualRevenue > 0
+        LIMIT 1000
+        """
+        
+        results = sf.query_all(query)
+        
+        if results['totalSize'] == 0:
+            st.warning("No accounts found in Salesforce")
+            return None
+        
+        # Convert to DataFrame
+        records = results['records']
+        df = pd.DataFrame([{
+            'account_id': r['Id'],
+            'company_name': r['Name'],
+            'region': map_country_to_region(r.get('BillingCountry', '')),
+            'industry': r.get('Industry', 'Unknown'),
+            'arr_value': r.get('AnnualRevenue', 0),
+            'company_size': categorize_company_size(r.get('NumberOfEmployees', 0)),
+            'contract_start_date': r.get('CreatedDate', '')[:10] if r.get('CreatedDate') else ''
+        } for r in records])
+        
+        return df
+    
+    except Exception as e:
+        st.error(f"Salesforce connection error: {str(e)}")
+        return None
+
+def load_amplitude_data(api_key: str, secret_key: str, start_date: str = None) -> Optional[pd.DataFrame]:
+    """
+    Load product usage data from Amplitude via API.
+    
+    Note: This uses the Amplitude Export API. Adjust endpoints based on your Amplitude setup.
+    """
+    try:
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        end_date = datetime.now().strftime("%Y%m%d")
+        
+        # Amplitude Export API endpoint (adjust for your project)
+        url = f"https://amplitude.com/api/2/export"
+        
+        params = {
+            'start': f"{start_date}T00",
+            'end': f"{end_date}T23"
+        }
+        
+        response = requests.get(
+            url,
+            auth=(api_key, secret_key),
+            params=params,
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            # Parse response (format depends on Amplitude setup)
+            # This is a simplified example - actual implementation depends on your event structure
+            data = response.json() if response.headers.get('content-type') == 'application/json' else []
+            
+            if not data:
+                st.warning("No data returned from Amplitude. Using sample data.")
+                return None
+            
+            # Process and aggregate by account
+            # (Implementation depends on your Amplitude event structure)
+            df = pd.DataFrame(data)
+            return df
+        
+        elif response.status_code == 401:
+            st.error("Amplitude authentication failed. Check your API credentials.")
+            return None
+        else:
+            st.error(f"Amplitude API error: {response.status_code}")
+            return None
+    
+    except Exception as e:
+        st.error(f"Amplitude connection error: {str(e)}")
+        return None
+
+def load_zendesk_data(subdomain: str, email: str, api_token: str) -> Optional[pd.DataFrame]:
+    """
+    Load support ticket data from Zendesk via API.
+    
+    Requires zenpy library.
+    """
+    if not ZENDESK_AVAILABLE:
+        st.error("zenpy library not installed. Run: pip install zenpy")
+        return None
+    
+    try:
+        creds = {
+            'email': email,
+            'token': api_token,
+            'subdomain': subdomain
+        }
+        
+        zenpy_client = Zenpy(**creds)
+        
+        # Get tickets from last 90 days
+        start_date = datetime.now() - timedelta(days=90)
+        
+        tickets = []
+        for ticket in zenpy_client.search(created_greater_than=start_date, type='ticket'):
+            tickets.append({
+                'ticket_id': ticket.id,
+                'account_id': ticket.organization_id if ticket.organization else None,
+                'status': ticket.status,
+                'priority': ticket.priority,
+                'created_at': ticket.created_at,
+                'updated_at': ticket.updated_at,
+                'satisfaction_rating': getattr(ticket.satisfaction_rating, 'score', None) if ticket.satisfaction_rating else None
+            })
+        
+        df = pd.DataFrame(tickets)
+        
+        if df.empty:
+            st.warning("No tickets found in Zendesk")
+            return None
+        
+        # Aggregate by account
+        account_stats = df.groupby('account_id').agg({
+            'ticket_id': 'count',
+            'priority': lambda x: (x == 'urgent').sum() + (x == 'high').sum(),
+            'satisfaction_rating': 'mean'
+        }).reset_index()
+        
+        account_stats.columns = ['account_id', 'support_tickets_last_quarter', 'escalation_count', 'nps_score']
+        
+        return account_stats
+    
+    except Exception as e:
+        st.error(f"Zendesk connection error: {str(e)}")
+        return None
+
+def merge_datasets(sf_df: pd.DataFrame, amp_df: Optional[pd.DataFrame], zd_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Merge data from multiple sources into unified dataset.
+    """
+    merged = sf_df.copy()
+    
+    if amp_df is not None and not amp_df.empty and 'account_id' in amp_df.columns:
+        merged = merged.merge(amp_df, on='account_id', how='left', suffixes=('', '_amp'))
+    
+    if zd_df is not None and not zd_df.empty and 'account_id' in zd_df.columns:
+        merged = merged.merge(zd_df, on='account_id', how='left', suffixes=('', '_zd'))
+    
+    # Fill missing numeric values
+    numeric_cols = merged.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        if merged[col].isna().any():
+            merged[col] = merged[col].fillna(merged[col].median())
+    
+    return merged
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def map_country_to_region(country: str) -> str:
+    """Map country to region."""
+    if not country:
+        return "AMER"
+    
+    country = country.upper()
+    
+    apac_countries = ['CHINA', 'JAPAN', 'INDIA', 'AUSTRALIA', 'SINGAPORE', 'KOREA', 'HONG KONG', 'TAIWAN']
+    emea_countries = ['UNITED KINGDOM', 'UK', 'GERMANY', 'FRANCE', 'ITALY', 'SPAIN', 'NETHERLANDS', 
+                      'SWEDEN', 'NORWAY', 'DENMARK', 'SWITZERLAND', 'AUSTRIA', 'BELGIUM', 'IRELAND',
+                      'SOUTH AFRICA', 'UAE', 'ISRAEL', 'SAUDI ARABIA']
+    
+    if any(c in country for c in apac_countries):
+        return "APAC"
+    elif any(c in country for c in emea_countries):
+        return "EMEA"
+    return "AMER"
+
+def categorize_company_size(employees: int) -> str:
+    """Categorize company by employee count."""
+    if employees < 100:
+        return "SMB"
+    elif employees < 1000:
+        return "Mid-Market"
+    return "Enterprise"
+
+def format_currency(value: float) -> str:
+    """Format value as currency."""
+    if value >= 1_000_000:
+        return f"${value/1_000_000:.1f}M"
+    elif value >= 1_000:
+        return f"${value/1_000:.0f}K"
+    return f"${value:.0f}"
 
 # =============================================================================
 # RISK COMPUTATION
 # =============================================================================
 
-def compute_risk_attribution(df: pd.DataFrame, benchmarks: Benchmark = BENCHMARKS) -> Dict:
+def compute_risk_scores(df: pd.DataFrame, benchmarks: Benchmark) -> pd.DataFrame:
     """
-    Compute risk attribution scores by category and sub-metric.
-    
-    Args:
-        df: Customer DataFrame
-        benchmarks: Benchmark configuration
-        
-    Returns:
-        Dictionary containing risk scores and attributions
+    Compute risk scores for each account.
     """
-    # Filter to at-risk accounts (high + medium risk)
-    at_risk = df[df["risk_tier"].isin(["High", "Medium"])]
-    total_risk_arr = at_risk["arr_value"].sum()
+    df = df.copy()
     
-    # Product Risk Components
-    product_gaps_score = max(0, (benchmarks.core_module_adoption - df["core_module_adoption"].mean()))
-    seat_util_score = max(0, (benchmarks.seat_utilization - df["seat_utilization_pct"].mean()))
-    feature_adoption_score = max(0, (0.7 - df["feature_adoption_score"].mean()))
+    # Ensure required columns exist with defaults
+    required_cols = {
+        'core_module_adoption': 0.5,
+        'onboarding_completion_pct': 0.5,
+        'weekly_logins': 3,
+        'time_to_first_value_days': 21,
+        'seat_utilization_pct': 0.5,
+        'support_tickets_last_quarter': 2,
+        'nps_score': 7.0,
+        'csm_engagement_score': 0.5,
+        'training_completion_pct': 0.5,
+        'feature_adoption_score': 0.5,
+        'api_integration_count': 2
+    }
     
-    product_risk = (product_gaps_score + seat_util_score + feature_adoption_score) / 3
+    for col, default in required_cols.items():
+        if col not in df.columns:
+            df[col] = default
     
-    # Process Risk Components
-    onboarding_score = max(0, (benchmarks.onboarding_completion - df["onboarding_completion_pct"].mean()))
-    login_score = max(0, (benchmarks.weekly_logins - df["weekly_logins"].mean()) / benchmarks.weekly_logins)
-    ttfv_score = max(0, (df["time_to_first_value_days"].mean() - benchmarks.time_to_first_value_days) / 30)
+    # Calculate deviation scores (higher = worse)
+    df['product_risk_score'] = (
+        max(0, (benchmarks.core_module_adoption - df['core_module_adoption'].clip(0, 1))) * 0.4 +
+        max(0, (benchmarks.seat_utilization - df['seat_utilization_pct'].clip(0, 1))) * 0.3 +
+        max(0, (0.7 - df['feature_adoption_score'].clip(0, 1))) * 0.3
+    )
     
-    process_risk = (onboarding_score + login_score + ttfv_score) / 3
+    df['process_risk_score'] = (
+        max(0, (benchmarks.onboarding_completion - df['onboarding_completion_pct'].clip(0, 1))) * 0.35 +
+        np.clip((benchmarks.weekly_logins - df['weekly_logins']) / benchmarks.weekly_logins, 0, 1) * 0.35 +
+        np.clip((df['time_to_first_value_days'] - benchmarks.time_to_first_value_days) / 30, 0, 1) * 0.30
+    )
     
-    # Development/Training Risk Components
-    training_score = max(0, (0.8 - df["training_completion_pct"].mean()))
-    api_score = max(0, (5 - df["api_integration_count"].mean()) / 5)
+    df['development_risk_score'] = (
+        max(0, (0.8 - df['training_completion_pct'].clip(0, 1))) * 0.5 +
+        np.clip((5 - df['api_integration_count']) / 5, 0, 1) * 0.5
+    )
     
-    development_risk = (training_score + api_score) / 2
+    df['relationship_risk_score'] = (
+        np.clip((benchmarks.nps_score - df['nps_score']) / 10, 0, 1) * 0.35 +
+        max(0, (0.8 - df['csm_engagement_score'].clip(0, 1))) * 0.35 +
+        np.clip(df['support_tickets_last_quarter'] / 10, 0, 1) * 0.30
+    )
     
-    # Relationship Risk Components
-    nps_score = max(0, (benchmarks.nps_score - df["nps_score"].mean()) / 10)
-    csm_score = max(0, (0.8 - df["csm_engagement_score"].mean()))
-    support_score = min(1, df["support_tickets_last_quarter"].mean() / 10)
+    # Overall churn probability
+    df['churn_probability'] = (
+        df['product_risk_score'] * RISK_WEIGHTS['product'] +
+        df['process_risk_score'] * RISK_WEIGHTS['process'] +
+        df['development_risk_score'] * RISK_WEIGHTS['development'] +
+        df['relationship_risk_score'] * RISK_WEIGHTS['relationship']
+    )
     
-    relationship_risk = (nps_score + csm_score + support_score) / 3
+    # Normalize to 0-1 range
+    df['churn_probability'] = df['churn_probability'].clip(0, 1)
     
-    # Normalize to percentages (sum to 100%)
+    # Risk tier assignment
+    df['risk_tier'] = pd.cut(
+        df['churn_probability'],
+        bins=[0, 0.3, 0.6, 1.0],
+        labels=['Low', 'Medium', 'High']
+    )
+    
+    return df
+
+def compute_risk_attribution(df: pd.DataFrame, benchmarks: Benchmark) -> Dict:
+    """
+    Compute aggregated risk attribution by category.
+    """
+    at_risk = df[df['risk_tier'].isin(['High', 'Medium'])]
+    total_risk_arr = at_risk['arr_value'].sum() if 'arr_value' in at_risk.columns else 0
+    
+    # Category scores
+    product_risk = df['product_risk_score'].mean() if 'product_risk_score' in df.columns else 0.3
+    process_risk = df['process_risk_score'].mean() if 'process_risk_score' in df.columns else 0.25
+    development_risk = df['development_risk_score'].mean() if 'development_risk_score' in df.columns else 0.25
+    relationship_risk = df['relationship_risk_score'].mean() if 'relationship_risk_score' in df.columns else 0.2
+    
     total_raw_risk = product_risk + process_risk + development_risk + relationship_risk
     
     if total_raw_risk > 0:
@@ -603,7 +856,8 @@ def compute_risk_attribution(df: pd.DataFrame, benchmarks: Benchmark = BENCHMARK
     return {
         "total_risk_arr": total_risk_arr,
         "at_risk_accounts": len(at_risk),
-        "high_risk_accounts": len(df[df["risk_tier"] == "High"]),
+        "high_risk_accounts": len(df[df['risk_tier'] == 'High']),
+        "total_accounts": len(df),
         "categories": {
             "product": {
                 "percentage": round(product_pct),
@@ -611,25 +865,22 @@ def compute_risk_attribution(df: pd.DataFrame, benchmarks: Benchmark = BENCHMARK
                 "health_score": int(5 - min(5, product_risk * 10)),
                 "sub_metrics": {
                     "product_gaps": {
-                        "label": "Product Gaps",
-                        "value": round(df["core_module_adoption"].mean() * 100),
+                        "label": "Core Module Adoption",
+                        "value": round(df['core_module_adoption'].mean() * 100),
                         "benchmark": int(benchmarks.core_module_adoption * 100),
-                        "delta": round((df["core_module_adoption"].mean() - benchmarks.core_module_adoption) * 100),
-                        "status": "below" if df["core_module_adoption"].mean() < benchmarks.core_module_adoption else "above"
+                        "delta": round((df['core_module_adoption'].mean() - benchmarks.core_module_adoption) * 100),
                     },
                     "seat_utilization": {
                         "label": "Seat Utilization",
-                        "value": round(df["seat_utilization_pct"].mean() * 100),
+                        "value": round(df['seat_utilization_pct'].mean() * 100),
                         "benchmark": int(benchmarks.seat_utilization * 100),
-                        "delta": round((df["seat_utilization_pct"].mean() - benchmarks.seat_utilization) * 100),
-                        "status": "below" if df["seat_utilization_pct"].mean() < benchmarks.seat_utilization else "above"
+                        "delta": round((df['seat_utilization_pct'].mean() - benchmarks.seat_utilization) * 100),
                     },
                     "feature_adoption": {
                         "label": "Feature Adoption",
-                        "value": round(df["feature_adoption_score"].mean() * 100),
+                        "value": round(df['feature_adoption_score'].mean() * 100),
                         "benchmark": 70,
-                        "delta": round((df["feature_adoption_score"].mean() - 0.7) * 100),
-                        "status": "below" if df["feature_adoption_score"].mean() < 0.7 else "above"
+                        "delta": round((df['feature_adoption_score'].mean() - 0.7) * 100),
                     }
                 }
             },
@@ -640,25 +891,22 @@ def compute_risk_attribution(df: pd.DataFrame, benchmarks: Benchmark = BENCHMARK
                 "sub_metrics": {
                     "onboarding": {
                         "label": "Onboarding Completion",
-                        "value": round(df["onboarding_completion_pct"].mean() * 100),
+                        "value": round(df['onboarding_completion_pct'].mean() * 100),
                         "benchmark": int(benchmarks.onboarding_completion * 100),
-                        "delta": round((df["onboarding_completion_pct"].mean() - benchmarks.onboarding_completion) * 100),
-                        "status": "below" if df["onboarding_completion_pct"].mean() < benchmarks.onboarding_completion else "above"
+                        "delta": round((df['onboarding_completion_pct'].mean() - benchmarks.onboarding_completion) * 100),
                     },
                     "login_frequency": {
-                        "label": "Login Frequency",
-                        "value": round(df["weekly_logins"].mean(), 1),
+                        "label": "Weekly Logins (Avg)",
+                        "value": round(df['weekly_logins'].mean(), 1),
                         "benchmark": benchmarks.weekly_logins,
-                        "delta": round(df["weekly_logins"].mean() - benchmarks.weekly_logins, 1),
-                        "status": "below" if df["weekly_logins"].mean() < benchmarks.weekly_logins else "above"
+                        "delta": round(df['weekly_logins'].mean() - benchmarks.weekly_logins, 1),
                     },
                     "ttfv": {
-                        "label": "Time to First Value",
-                        "value": round(df["time_to_first_value_days"].mean()),
+                        "label": "Time to First Value (Days)",
+                        "value": round(df['time_to_first_value_days'].mean()),
                         "benchmark": benchmarks.time_to_first_value_days,
-                        "delta": round(df["time_to_first_value_days"].mean() - benchmarks.time_to_first_value_days),
-                        "status": "above" if df["time_to_first_value_days"].mean() > benchmarks.time_to_first_value_days else "below",
-                        "inverse": True  # Lower is better
+                        "delta": round(df['time_to_first_value_days'].mean() - benchmarks.time_to_first_value_days),
+                        "inverse": True
                     }
                 }
             },
@@ -669,17 +917,15 @@ def compute_risk_attribution(df: pd.DataFrame, benchmarks: Benchmark = BENCHMARK
                 "sub_metrics": {
                     "training": {
                         "label": "Training Completion",
-                        "value": round(df["training_completion_pct"].mean() * 100),
+                        "value": round(df['training_completion_pct'].mean() * 100),
                         "benchmark": 80,
-                        "delta": round((df["training_completion_pct"].mean() - 0.8) * 100),
-                        "status": "below" if df["training_completion_pct"].mean() < 0.8 else "above"
+                        "delta": round((df['training_completion_pct'].mean() - 0.8) * 100),
                     },
                     "api_integration": {
-                        "label": "API Integrations",
-                        "value": round(df["api_integration_count"].mean(), 1),
+                        "label": "API Integrations (Avg)",
+                        "value": round(df['api_integration_count'].mean(), 1),
                         "benchmark": 5,
-                        "delta": round(df["api_integration_count"].mean() - 5, 1),
-                        "status": "below" if df["api_integration_count"].mean() < 5 else "above"
+                        "delta": round(df['api_integration_count'].mean() - 5, 1),
                     }
                 }
             },
@@ -690,30 +936,195 @@ def compute_risk_attribution(df: pd.DataFrame, benchmarks: Benchmark = BENCHMARK
                 "sub_metrics": {
                     "nps": {
                         "label": "NPS Score",
-                        "value": round(df["nps_score"].mean(), 1),
+                        "value": round(df['nps_score'].mean(), 1),
                         "benchmark": benchmarks.nps_score,
-                        "delta": round(df["nps_score"].mean() - benchmarks.nps_score, 1),
-                        "status": "below" if df["nps_score"].mean() < benchmarks.nps_score else "above"
+                        "delta": round(df['nps_score'].mean() - benchmarks.nps_score, 1),
                     },
                     "csm_engagement": {
                         "label": "CSM Engagement",
-                        "value": round(df["csm_engagement_score"].mean() * 100),
+                        "value": round(df['csm_engagement_score'].mean() * 100),
                         "benchmark": 80,
-                        "delta": round((df["csm_engagement_score"].mean() - 0.8) * 100),
-                        "status": "below" if df["csm_engagement_score"].mean() < 0.8 else "above"
+                        "delta": round((df['csm_engagement_score'].mean() - 0.8) * 100),
                     },
                     "support_health": {
-                        "label": "Support Tickets",
-                        "value": round(df["support_tickets_last_quarter"].mean(), 1),
+                        "label": "Support Tickets (Avg)",
+                        "value": round(df['support_tickets_last_quarter'].mean(), 1),
                         "benchmark": benchmarks.support_tickets_threshold,
-                        "delta": round(df["support_tickets_last_quarter"].mean() - benchmarks.support_tickets_threshold, 1),
-                        "status": "above" if df["support_tickets_last_quarter"].mean() > benchmarks.support_tickets_threshold else "below",
-                        "inverse": True  # Lower is better
+                        "delta": round(df['support_tickets_last_quarter'].mean() - benchmarks.support_tickets_threshold, 1),
+                        "inverse": True
                     }
                 }
             }
         }
     }
+
+# =============================================================================
+# CLAUDE AI ANALYSIS
+# =============================================================================
+
+def prepare_analysis_summary(df: pd.DataFrame, risk_data: Dict) -> str:
+    """
+    Prepare a rich summary for Claude analysis.
+    """
+    # Regional breakdown
+    regional_stats = df.groupby('region').agg({
+        'account_id': 'count',
+        'arr_value': 'sum',
+        'churn_probability': 'mean',
+        'core_module_adoption': 'mean',
+        'weekly_logins': 'mean',
+        'support_tickets_last_quarter': 'mean',
+        'nps_score': 'mean'
+    }).round(2).to_dict()
+    
+    # Risk tier breakdown
+    risk_breakdown = df.groupby('risk_tier').agg({
+        'account_id': 'count',
+        'arr_value': 'sum'
+    }).to_dict()
+    
+    # Top risk factors
+    high_risk = df[df['risk_tier'] == 'High']
+    
+    summary = {
+        "overview": {
+            "total_accounts": len(df),
+            "total_arr": int(df['arr_value'].sum()),
+            "at_risk_accounts": risk_data['at_risk_accounts'],
+            "high_risk_accounts": risk_data['high_risk_accounts'],
+            "arr_at_risk": int(risk_data['total_risk_arr']),
+            "average_churn_probability": round(df['churn_probability'].mean() * 100, 1)
+        },
+        "risk_attribution": {
+            "product_risk_pct": risk_data['categories']['product']['percentage'],
+            "process_risk_pct": risk_data['categories']['process']['percentage'],
+            "development_risk_pct": risk_data['categories']['development']['percentage'],
+            "relationship_risk_pct": risk_data['categories']['relationship']['percentage']
+        },
+        "key_metrics": {
+            "avg_core_module_adoption": round(df['core_module_adoption'].mean() * 100, 1),
+            "avg_onboarding_completion": round(df['onboarding_completion_pct'].mean() * 100, 1),
+            "avg_weekly_logins": round(df['weekly_logins'].mean(), 1),
+            "avg_time_to_first_value_days": round(df['time_to_first_value_days'].mean(), 1),
+            "avg_seat_utilization": round(df['seat_utilization_pct'].mean() * 100, 1),
+            "avg_nps_score": round(df['nps_score'].mean(), 1),
+            "avg_support_tickets": round(df['support_tickets_last_quarter'].mean(), 1),
+            "avg_training_completion": round(df['training_completion_pct'].mean() * 100, 1)
+        },
+        "regional_breakdown": regional_stats,
+        "benchmark_gaps": {
+            "core_adoption_gap": round((0.80 - df['core_module_adoption'].mean()) * 100, 1),
+            "onboarding_gap": round((0.90 - df['onboarding_completion_pct'].mean()) * 100, 1),
+            "seat_utilization_gap": round((0.75 - df['seat_utilization_pct'].mean()) * 100, 1),
+            "nps_gap": round(8.0 - df['nps_score'].mean(), 1)
+        },
+        "high_risk_characteristics": {
+            "count": len(high_risk),
+            "avg_adoption": round(high_risk['core_module_adoption'].mean() * 100, 1) if len(high_risk) > 0 else 0,
+            "avg_support_tickets": round(high_risk['support_tickets_last_quarter'].mean(), 1) if len(high_risk) > 0 else 0,
+            "total_arr": int(high_risk['arr_value'].sum()) if len(high_risk) > 0 else 0
+        }
+    }
+    
+    return json.dumps(summary, indent=2)
+
+def get_claude_insights(summary: str, api_key: str = None) -> Optional[str]:
+    """
+    Get AI-powered retention insights from Claude.
+    """
+    if not ANTHROPIC_AVAILABLE:
+        return """
+## ⚠️ Anthropic Library Not Available
+
+The `anthropic` Python library is not installed. To enable AI-powered insights:
+
+```bash
+pip install anthropic
+```
+
+Then add your API key to Streamlit secrets or the sidebar.
+
+---
+
+### Sample Analysis (Static)
+
+Based on typical patterns in customer success data:
+
+**Top Pain Points:**
+1. Low core module adoption indicates customers aren't discovering full product value
+2. Extended time-to-first-value suggests onboarding friction
+3. High support ticket volume correlates with churn risk
+
+**Recommendations:**
+1. Implement guided product tours for underutilized features
+2. Create quick-start templates to accelerate time-to-value
+3. Proactive CSM outreach to high-ticket accounts
+"""
+    
+    # Try to get API key from various sources
+    if not api_key:
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY")
+        except:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+    
+    if not api_key:
+        return "❌ **Anthropic API key not configured.** Add `ANTHROPIC_API_KEY` to your Streamlit secrets or environment variables."
+    
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        prompt = f"""You are an elite Customer Success and Retention expert with deep expertise in SaaS metrics, churn analysis, and data-driven retention strategies.
+
+Analyze the following aggregated customer churn risk data from our integrated Salesforce (CRM), Amplitude (product analytics), and Zendesk (support) systems:
+
+```json
+{summary}
+```
+
+Provide a comprehensive retention analysis with the following structure:
+
+## 🔴 Top Pain Points Driving ARR Risk
+
+Identify 4-6 critical pain points causing churn risk. For each:
+- Clear problem statement
+- Supporting data/evidence from the metrics
+- Estimated ARR impact if unaddressed
+
+## 🔍 Root Cause Analysis
+
+For each pain point, explain:
+- The underlying root cause
+- How different data sources confirm this (e.g., low adoption + high tickets = product-market fit issues)
+- Customer segments most affected
+
+## ✅ Prioritized Retention Recommendations
+
+Provide 6-8 specific, actionable recommendations ranked by estimated impact:
+1. **[Action Title]** - [IMPACT: High/Medium]
+   - What to do (specific steps)
+   - Expected outcome
+   - Estimated ARR lift potential (% or range)
+   - Timeline to implement
+
+Focus on actionable insights that a CS team could implement immediately. Use concrete numbers from the data to support your analysis. Be direct and specific - avoid generic advice."""
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2500,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        return message.content[0].text
+    
+    except anthropic.AuthenticationError:
+        return "❌ **Invalid Anthropic API key.** Please check your API key and try again."
+    except anthropic.RateLimitError:
+        return "⏳ **Rate limit exceeded.** Please wait a moment and try again."
+    except Exception as e:
+        return f"❌ **Error getting AI insights:** {str(e)}"
 
 # =============================================================================
 # UI COMPONENTS
@@ -729,59 +1140,20 @@ def render_score_dots(score: int, max_score: int = 5, filled_color: str = "#ff9f
             dots.append('<span class="score-dot"></span>')
     return f'<div class="score-dots">{"".join(dots)}</div>'
 
-def render_progress_bar(value: float, max_value: float = 100, color: str = "#54a0ff") -> str:
-    """Render a progress bar."""
-    pct = min(100, (value / max_value) * 100)
-    return f'''
-    <div class="progress-bar-container">
-        <div class="progress-bar-fill" style="width: {pct}%; background: {color};"></div>
-    </div>
-    '''
-
 def get_risk_badge_class(percentage: int) -> str:
-    """Get CSS class for risk badge based on percentage."""
+    """Get CSS class for risk badge."""
     if percentage >= 35:
         return "risk-badge-high"
     elif percentage >= 25:
         return "risk-badge-medium"
     return "risk-badge-low"
 
-def get_delta_color(delta: float, inverse: bool = False) -> str:
-    """Get color for delta value."""
-    if inverse:
-        delta = -delta
-    if delta < 0:
-        return "metric-delta-negative"
-    return "metric-delta-positive"
-
-def format_currency(value: float) -> str:
-    """Format value as currency."""
-    if value >= 1_000_000:
-        return f"${value/1_000_000:.1f}M"
-    elif value >= 1_000:
-        return f"${value/1_000:.0f}K"
-    return f"${value:.0f}"
-
-def render_risk_category_card(
-    category_name: str,
-    category_data: Dict,
-    icon: str,
-    expanded: bool = False
-) -> None:
-    """
-    Render a risk category card with sub-metrics.
-    
-    Args:
-        category_name: Display name of the category
-        category_data: Dictionary containing category metrics
-        icon: Emoji icon for the category
-        expanded: Whether to show sub-metrics expanded
-    """
+def render_risk_category_card(category_name: str, category_data: Dict, icon: str) -> None:
+    """Render a risk category card."""
     pct = category_data["percentage"]
     health = category_data["health_score"]
     badge_class = get_risk_badge_class(pct)
     
-    # Determine score dot color based on health
     if health >= 4:
         dot_color = "#26de81"
     elif health >= 3:
@@ -789,7 +1161,6 @@ def render_risk_category_card(
     else:
         dot_color = "#ff4d4d"
     
-    # Main card HTML
     card_html = f'''
     <div class="risk-card animate-fade-in">
         <div class="risk-card-header">
@@ -803,36 +1174,40 @@ def render_risk_category_card(
     '''
     st.markdown(card_html, unsafe_allow_html=True)
     
-    # Sub-metrics in expander
-    with st.expander(f"View {category_name} Details", expanded=expanded):
+    with st.expander(f"View {category_name} Details"):
         for metric_key, metric_data in category_data["sub_metrics"].items():
             is_inverse = metric_data.get("inverse", False)
-            delta_class = get_delta_color(metric_data["delta"], is_inverse)
-            delta_sign = "+" if metric_data["delta"] > 0 else ""
+            delta = metric_data["delta"]
             
-            # For inverse metrics, flip the visual indicator
             if is_inverse:
-                status_text = "above benchmark ⚠️" if metric_data["status"] == "above" else "at benchmark ✓"
+                delta_class = "metric-delta-negative" if delta > 0 else "metric-delta-positive"
+                status_text = "above benchmark ⚠️" if delta > 0 else "at benchmark ✓"
             else:
-                status_text = "below benchmark ⚠️" if metric_data["status"] == "below" else "at benchmark ✓"
+                delta_class = "metric-delta-negative" if delta < 0 else "metric-delta-positive"
+                status_text = "below benchmark ⚠️" if delta < 0 else "at benchmark ✓"
+            
+            delta_sign = "+" if delta > 0 else ""
             
             sub_html = f'''
             <div class="sub-card">
                 <p class="sub-card-title">{metric_data["label"]}</p>
                 <p class="sub-metric">
-                    {metric_data["value"]}{"%" if "pct" in metric_key or "Completion" in metric_data["label"] or "Utilization" in metric_data["label"] or "Adoption" in metric_data["label"] else ""}
-                    <span class="metric-delta {delta_class}">{delta_sign}{metric_data["delta"]}</span>
+                    {metric_data["value"]}
+                    <span class="metric-delta {delta_class}">{delta_sign}{delta}</span>
                 </p>
                 <p class="benchmark-text">Benchmark: {metric_data["benchmark"]} • {status_text}</p>
             </div>
             '''
             st.markdown(sub_html, unsafe_allow_html=True)
 
-def render_header(risk_data: Dict, region: str) -> None:
-    """Render the dashboard header with key metrics."""
+def render_header(risk_data: Dict, region: str, data_source: str) -> None:
+    """Render the dashboard header."""
     total_risk_arr = risk_data["total_risk_arr"]
     at_risk = risk_data["at_risk_accounts"]
     high_risk = risk_data["high_risk_accounts"]
+    total = risk_data["total_accounts"]
+    
+    source_badge = "📁 CSV" if data_source == "csv" else "🔌 API" if data_source == "api" else "🎲 Sample"
     
     header_html = f'''
     <div class="dashboard-header">
@@ -840,15 +1215,15 @@ def render_header(risk_data: Dict, region: str) -> None:
             <div>
                 <h1 class="header-title">🎯 Root-Cause Analysis</h1>
                 <p class="header-subtitle">
-                    <span class="count-badge">{len(risk_data["categories"])}</span>
-                    risk categories identified • 
-                    <span style="color: #ff4d4d;">{high_risk} high-risk</span> accounts • 
+                    <span style="background: rgba(84, 160, 255, 0.15); color: #54a0ff; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; margin-right: 8px;">{source_badge}</span>
+                    {len(risk_data["categories"])} risk categories • 
+                    <span style="color: #ff4d4d;">{high_risk} high-risk</span> / {total} accounts • 
                     Region: <strong>{region}</strong>
                 </p>
             </div>
             <div style="display: flex; gap: 12px; align-items: center;">
                 <span style="background: rgba(255, 159, 67, 0.15); color: #ff9f43; padding: 6px 12px; border-radius: 8px; font-size: 0.85rem; font-weight: 600;">
-                    +3 new risks
+                    +{high_risk} critical
                 </span>
             </div>
         </div>
@@ -865,96 +1240,315 @@ def render_header(risk_data: Dict, region: str) -> None:
                 <p class="metric-value" style="color: #ff9f43;">{high_risk}</p>
                 <p class="metric-label">High Priority</p>
             </div>
+            <div>
+                <p class="metric-value" style="color: #26de81;">{total - at_risk}</p>
+                <p class="metric-label">Healthy Accounts</p>
+            </div>
         </div>
     </div>
     '''
     st.markdown(header_html, unsafe_allow_html=True)
 
-def render_sidebar() -> Tuple[str, bool]:
-    """Render the sidebar navigation and filters."""
+def render_ai_insights_section(df: pd.DataFrame, risk_data: Dict) -> None:
+    """Render the AI-powered insights section."""
+    st.markdown("### 🤖 AI-Powered Retention Analysis")
+    st.markdown("""
+    <p style="color: #8b949e; margin-bottom: 20px;">
+        Powered by Claude AI • Analyzes merged Salesforce, Amplitude, and Zendesk data
+    </p>
+    """, unsafe_allow_html=True)
+    
+    # API Key input (if not in secrets)
+    api_key = None
+    try:
+        api_key = st.secrets.get("ANTHROPIC_API_KEY")
+    except:
+        pass
+    
+    if not api_key:
+        api_key = st.session_state.get("anthropic_api_key")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if not api_key:
+            new_key = st.text_input(
+                "Anthropic API Key",
+                type="password",
+                placeholder="sk-ant-...",
+                help="Enter your Anthropic API key to enable AI analysis"
+            )
+            if new_key:
+                st.session_state.anthropic_api_key = new_key
+                api_key = new_key
+    
+    with col2:
+        analyze_button = st.button("🔄 Generate AI Analysis", use_container_width=True, type="primary")
+    
+    if analyze_button or st.session_state.get("ai_insights"):
+        if analyze_button:
+            with st.spinner("🧠 Claude is analyzing your customer data..."):
+                summary = prepare_analysis_summary(df, risk_data)
+                insights = get_claude_insights(summary, api_key)
+                st.session_state.ai_insights = insights
+                st.session_state.ai_summary = summary
+        
+        insights = st.session_state.get("ai_insights", "")
+        
+        if insights:
+            st.markdown(f"""
+            <div class="ai-insight-card">
+                <div class="ai-insight-header">
+                    <span style="font-size: 1.5rem;">🧠</span>
+                    <span class="ai-insight-title">Claude's Retention Analysis</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown(insights)
+            
+            # Show raw data summary in expander
+            with st.expander("📊 View Data Summary Sent to Claude"):
+                st.code(st.session_state.get("ai_summary", ""), language="json")
+
+def render_data_source_selector() -> Tuple[str, Optional[pd.DataFrame]]:
+    """Render data source selection UI and return loaded data."""
+    st.markdown("### 📥 Data Source")
+    
+    source_mode = st.radio(
+        "Choose data ingestion method:",
+        ["🎲 Sample Data (Demo)", "📁 Upload CSV Files", "🔌 Connect APIs"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    
+    df = None
+    data_source = "sample"
+    
+    if "Sample Data" in source_mode:
+        st.info("Using simulated customer data for demonstration. Connect real data sources for production use.")
+        if st.button("🔄 Regenerate Sample Data"):
+            st.session_state.data_seed = np.random.randint(1, 10000)
+        seed = st.session_state.get("data_seed", 42)
+        df = generate_sample_data(n_accounts=300, seed=seed)
+        data_source = "sample"
+    
+    elif "Upload CSV" in source_mode:
+        st.markdown("""
+        <div class="api-input-container">
+            <p style="color: #d1d5db; margin-bottom: 12px;">Upload your data files (CSV format)</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("**Salesforce Accounts** (Required)")
+            sf_file = st.file_uploader("Account data with ARR", type=['csv'], key="sf_upload", label_visibility="collapsed")
+        
+        with col2:
+            st.markdown("**Amplitude Usage** (Optional)")
+            amp_file = st.file_uploader("Product usage metrics", type=['csv'], key="amp_upload", label_visibility="collapsed")
+        
+        with col3:
+            st.markdown("**Zendesk Tickets** (Optional)")
+            zd_file = st.file_uploader("Support ticket data", type=['csv'], key="zd_upload", label_visibility="collapsed")
+        
+        if sf_file:
+            df = load_csv_data(sf_file, amp_file, zd_file)
+            data_source = "csv"
+        else:
+            st.warning("Please upload at least the Salesforce accounts CSV to proceed.")
+        
+        with st.expander("📋 Expected CSV Formats"):
+            st.markdown("""
+            **Salesforce CSV columns:**
+            `account_id, company_name, region, arr_value, industry, company_size, contract_start_date, renewal_date`
+            
+            **Amplitude CSV columns:**
+            `account_id, weekly_logins, core_module_adoption, seat_utilization_pct, feature_adoption_score, time_to_first_value_days, onboarding_completion_pct, training_completion_pct`
+            
+            **Zendesk CSV columns:**
+            `account_id, support_tickets_last_quarter, escalation_count, avg_ticket_resolution_hours, nps_score, csm_engagement_score`
+            """)
+    
+    elif "Connect APIs" in source_mode:
+        st.markdown("""
+        <div class="api-input-container">
+            <p style="color: #d1d5db; margin-bottom: 12px;">🔐 API credentials are stored in session only (not persisted)</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        tabs = st.tabs(["Salesforce", "Amplitude", "Zendesk"])
+        
+        sf_data = None
+        amp_data = None
+        zd_data = None
+        
+        with tabs[0]:
+            st.markdown("#### Salesforce Connection")
+            col1, col2 = st.columns(2)
+            with col1:
+                sf_username = st.text_input("Username", key="sf_user", placeholder="user@company.com")
+                sf_password = st.text_input("Password", type="password", key="sf_pass")
+            with col2:
+                sf_token = st.text_input("Security Token", type="password", key="sf_token")
+                sf_domain = st.selectbox("Domain", ["login", "test"], key="sf_domain")
+            
+            if st.button("Connect to Salesforce", key="sf_connect"):
+                if all([sf_username, sf_password, sf_token]):
+                    with st.spinner("Connecting to Salesforce..."):
+                        sf_data = load_salesforce_data(sf_username, sf_password, sf_token, sf_domain)
+                        if sf_data is not None:
+                            st.session_state.sf_data = sf_data
+                            st.success(f"✅ Connected! Loaded {len(sf_data)} accounts")
+                else:
+                    st.warning("Please fill all Salesforce credentials")
+            
+            if st.session_state.get("sf_data") is not None:
+                st.markdown('<span class="connection-status status-connected">● Connected</span>', unsafe_allow_html=True)
+                sf_data = st.session_state.sf_data
+        
+        with tabs[1]:
+            st.markdown("#### Amplitude Connection")
+            col1, col2 = st.columns(2)
+            with col1:
+                amp_api_key = st.text_input("API Key", type="password", key="amp_key")
+            with col2:
+                amp_secret = st.text_input("Secret Key", type="password", key="amp_secret")
+            
+            if st.button("Connect to Amplitude", key="amp_connect"):
+                if all([amp_api_key, amp_secret]):
+                    with st.spinner("Connecting to Amplitude..."):
+                        amp_data = load_amplitude_data(amp_api_key, amp_secret)
+                        if amp_data is not None:
+                            st.session_state.amp_data = amp_data
+                            st.success(f"✅ Connected!")
+                else:
+                    st.warning("Please fill all Amplitude credentials")
+            
+            if st.session_state.get("amp_data") is not None:
+                st.markdown('<span class="connection-status status-connected">● Connected</span>', unsafe_allow_html=True)
+                amp_data = st.session_state.amp_data
+        
+        with tabs[2]:
+            st.markdown("#### Zendesk Connection")
+            col1, col2 = st.columns(2)
+            with col1:
+                zd_subdomain = st.text_input("Subdomain", key="zd_subdomain", placeholder="yourcompany")
+                zd_email = st.text_input("Email", key="zd_email", placeholder="admin@company.com")
+            with col2:
+                zd_token = st.text_input("API Token", type="password", key="zd_token")
+            
+            if st.button("Connect to Zendesk", key="zd_connect"):
+                if all([zd_subdomain, zd_email, zd_token]):
+                    with st.spinner("Connecting to Zendesk..."):
+                        zd_data = load_zendesk_data(zd_subdomain, zd_email, zd_token)
+                        if zd_data is not None:
+                            st.session_state.zd_data = zd_data
+                            st.success(f"✅ Connected!")
+                else:
+                    st.warning("Please fill all Zendesk credentials")
+            
+            if st.session_state.get("zd_data") is not None:
+                st.markdown('<span class="connection-status status-connected">● Connected</span>', unsafe_allow_html=True)
+                zd_data = st.session_state.zd_data
+        
+        # Merge available data
+        sf_data = st.session_state.get("sf_data")
+        amp_data = st.session_state.get("amp_data")
+        zd_data = st.session_state.get("zd_data")
+        
+        if sf_data is not None:
+            df = merge_datasets(sf_data, amp_data, zd_data)
+            data_source = "api"
+        else:
+            st.info("Connect to Salesforce (required) to load account data. Amplitude and Zendesk are optional.")
+    
+    return data_source, df
+
+def render_sidebar(df: Optional[pd.DataFrame]) -> Tuple[str, Benchmark]:
+    """Render sidebar navigation and controls."""
     with st.sidebar:
         st.markdown("""
         <div style="padding: 20px 0; border-bottom: 1px solid #2d3139; margin-bottom: 20px;">
             <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.4rem; font-weight: 700; color: #ffffff; margin: 0;">
-                📊 ARR Risk Dashboard
+                🛡️ ChurnGuard
             </h2>
-            <p style="color: #6b7280; font-size: 0.85rem; margin-top: 4px;">Customer Success Analytics</p>
+            <p style="color: #6b7280; font-size: 0.85rem; margin-top: 4px;">AI-Powered Retention Analytics</p>
         </div>
         """, unsafe_allow_html=True)
         
         # Navigation
         st.markdown("### Navigation")
-        nav_options = ["Overview", "Revenue Impact", "Benchmarking", "ARR Plans", "Account Details"]
+        nav_options = ["📊 Overview", "🤖 AI Insights", "📈 Revenue Impact", "🎯 Benchmarking", "📋 Accounts"]
         
-        # Use session state for navigation
         if "nav_selection" not in st.session_state:
-            st.session_state.nav_selection = "Overview"
+            st.session_state.nav_selection = "📊 Overview"
         
         for nav in nav_options:
             is_selected = st.session_state.nav_selection == nav
-            if st.button(
-                f"{'◉' if is_selected else '○'} {nav}",
-                key=f"nav_{nav}",
-                use_container_width=True,
-                type="primary" if is_selected else "secondary"
-            ):
+            if st.button(nav, key=f"nav_{nav}", use_container_width=True, type="primary" if is_selected else "secondary"):
                 st.session_state.nav_selection = nav
         
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
         
         # Region Filter
-        st.markdown("### 🌍 Region Mapping")
-        region = st.selectbox(
-            "Select Region",
-            options=[r.value for r in Region],
-            index=0,
-            label_visibility="collapsed"
-        )
+        st.markdown("### 🌍 Region Filter")
+        regions = ["All Regions"]
+        if df is not None and 'region' in df.columns:
+            regions += df['region'].unique().tolist()
         
-        # Quick region buttons
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("AMER", use_container_width=True):
-                region = "AMER"
-        with col2:
-            if st.button("EMEA", use_container_width=True):
-                region = "EMEA"
-        with col3:
-            if st.button("APAC", use_container_width=True):
-                region = "APAC"
+        region = st.selectbox("Select Region", options=regions, label_visibility="collapsed")
         
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
         
         # Benchmark Adjustments
-        st.markdown("### ⚙️ Settings")
+        st.markdown("### ⚙️ Benchmarks")
         
-        with st.expander("Adjust Benchmarks"):
-            st.slider("Core Adoption %", 50, 100, 80, key="bench_adoption")
-            st.slider("Onboarding %", 50, 100, 90, key="bench_onboarding")
-            st.slider("Weekly Logins", 1, 10, 5, key="bench_logins")
+        with st.expander("Adjust Thresholds"):
+            core_adoption = st.slider("Core Adoption %", 50, 100, 80) / 100
+            onboarding = st.slider("Onboarding %", 50, 100, 90) / 100
+            weekly_logins = st.slider("Weekly Logins", 1, 10, 5)
+            ttfv = st.slider("TTFV (days)", 7, 30, 14)
+            seat_util = st.slider("Seat Utilization %", 50, 100, 75) / 100
+            nps = st.slider("NPS Score", 5.0, 10.0, 8.0, 0.5)
         
-        # Refresh Data
+        benchmarks = Benchmark(
+            core_module_adoption=core_adoption,
+            onboarding_completion=onboarding,
+            weekly_logins=weekly_logins,
+            time_to_first_value_days=ttfv,
+            seat_utilization=seat_util,
+            nps_score=nps
+        )
+        
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
         
-        refresh = st.button("🔄 Refresh Data", use_container_width=True)
-        
-        # Export placeholder
-        st.button("📄 Create Report", use_container_width=True, disabled=True)
+        # Data status
+        st.markdown("### 📊 Data Status")
+        if df is not None:
+            st.success(f"✅ {len(df)} accounts loaded")
+        else:
+            st.warning("No data loaded")
         
         # Footer
         st.markdown("""
         <div style="position: fixed; bottom: 20px; left: 20px; right: 20px; max-width: 260px;">
             <p style="color: #4b5563; font-size: 0.75rem; text-align: center;">
-                Last updated: Today at 2:34 PM<br>
-                Data refreshes every 4 hours
+                ⚠️ Data stored in session only<br>
+                Not persisted between sessions
             </p>
         </div>
         """, unsafe_allow_html=True)
         
-        return region, refresh
+        return region, benchmarks
+
+# =============================================================================
+# CHART COMPONENTS
+# =============================================================================
 
 def render_risk_distribution_chart(risk_data: Dict) -> None:
-    """Render a donut chart showing risk distribution."""
+    """Render risk distribution donut chart."""
     categories = risk_data["categories"]
     
     labels = ["Product Risk", "Process Risk", "Development Risk", "Relationship Risk"]
@@ -973,113 +1567,43 @@ def render_risk_distribution_chart(risk_data: Dict) -> None:
         marker=dict(colors=colors, line=dict(color='#0e1117', width=2)),
         textinfo='percent',
         textfont=dict(size=12, color='white', family='JetBrains Mono'),
-        hovertemplate="<b>%{label}</b><br>%{percent}<br>Risk Contribution<extra></extra>"
     )])
     
     fig.update_layout(
         showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.2,
-            xanchor="center",
-            x=0.5,
-            font=dict(color='#8b949e', size=11)
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5, font=dict(color='#8b949e', size=11)),
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(t=20, b=60, l=20, r=20),
         height=300,
-        annotations=[dict(
-            text=f'<b>{sum(values)}%</b><br><span style="font-size:10px">Total Risk</span>',
-            x=0.5, y=0.5,
-            font=dict(size=20, color='white', family='Outfit'),
-            showarrow=False
-        )]
+        annotations=[dict(text=f'<b>{sum(values):.0f}%</b>', x=0.5, y=0.5, font=dict(size=20, color='white'), showarrow=False)]
     )
     
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-def render_trend_chart(df: pd.DataFrame) -> None:
-    """Render a trend line chart for risk over time."""
-    # Generate synthetic trend data
-    dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
+def render_arr_by_risk_chart(df: pd.DataFrame) -> None:
+    """Render ARR by risk tier bar chart."""
+    arr_by_tier = df.groupby('risk_tier')['arr_value'].sum().reset_index()
+    arr_by_tier.columns = ['Risk Tier', 'ARR']
     
-    np.random.seed(42)
-    base_risk = 35
-    trend = np.cumsum(np.random.randn(30) * 2) + base_risk
-    trend = np.clip(trend, 10, 60)
-    
-    trend_df = pd.DataFrame({
-        'Date': dates,
-        'Risk Score': trend
-    })
-    
-    fig = px.line(
-        trend_df, x='Date', y='Risk Score',
-        line_shape='spline'
-    )
-    
-    fig.update_traces(
-        line=dict(color=COLORS["accent_blue"], width=3),
-        fill='tozeroy',
-        fillcolor='rgba(84, 160, 255, 0.1)'
+    fig = px.bar(
+        arr_by_tier,
+        x='Risk Tier',
+        y='ARR',
+        color='Risk Tier',
+        color_discrete_map={'Low': COLORS['accent_green'], 'Medium': COLORS['accent_orange'], 'High': COLORS['accent_red']}
     )
     
     fig.update_layout(
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(t=20, b=40, l=40, r=20),
-        height=200,
-        xaxis=dict(
-            showgrid=False,
-            color='#8b949e',
-            tickfont=dict(size=10)
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor='rgba(255,255,255,0.05)',
-            color='#8b949e',
-            tickfont=dict(size=10)
-        ),
-        hovermode='x unified'
+        xaxis=dict(color='#8b949e'),
+        yaxis=dict(color='#8b949e', gridcolor='rgba(255,255,255,0.05)'),
+        showlegend=False,
+        height=300
     )
     
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-
-def render_top_accounts_table(df: pd.DataFrame, n: int = 5) -> None:
-    """Render a table of top at-risk accounts."""
-    top_risk = df.nlargest(n, 'churn_probability')[
-        ['account_id', 'company_name', 'region', 'arr_value', 'churn_probability', 'risk_tier']
-    ].copy()
-    
-    top_risk['arr_value'] = top_risk['arr_value'].apply(format_currency)
-    top_risk['churn_probability'] = (top_risk['churn_probability'] * 100).round(0).astype(int).astype(str) + '%'
-    top_risk.columns = ['ID', 'Company', 'Region', 'ARR', 'Risk %', 'Tier']
-    
-    st.markdown("""
-    <style>
-    .dataframe {
-        font-family: 'JetBrains Mono', monospace !important;
-        font-size: 0.85rem !important;
-    }
-    .dataframe th {
-        background-color: #1a1d24 !important;
-        color: #8b949e !important;
-        font-weight: 500 !important;
-    }
-    .dataframe td {
-        background-color: #0e1117 !important;
-        color: #e5e7eb !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    st.dataframe(
-        top_risk,
-        use_container_width=True,
-        hide_index=True
-    )
 
 # =============================================================================
 # MAIN APPLICATION
@@ -1087,33 +1611,50 @@ def render_top_accounts_table(df: pd.DataFrame, n: int = 5) -> None:
 
 def main():
     """Main application entry point."""
-    # Page config
     st.set_page_config(
-        page_title="ARR Risk Attribution Dashboard",
-        page_icon="📊",
+        page_title="ChurnGuard - AI-Powered ARR Risk Dashboard",
+        page_icon="🛡️",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
-    # Inject custom CSS
     inject_custom_css()
+    
+    # Authentication
+    if not check_password():
+        return
     
     # Initialize session state
     if "data_seed" not in st.session_state:
         st.session_state.data_seed = 42
-    if "widgets" not in st.session_state:
-        st.session_state.widgets = []
     
-    # Render sidebar and get filters
-    region, refresh = render_sidebar()
+    # Data source selection (in main area first)
+    st.markdown("""
+    <div style="text-align: center; padding: 10px 0 20px 0;">
+        <h1 style="font-family: 'Outfit', sans-serif; font-size: 2rem; font-weight: 700; color: #ffffff; margin: 0;">
+            🛡️ ChurnGuard
+        </h1>
+        <p style="color: #8b949e; font-size: 1rem;">AI-Powered ARR Risk & Retention Dashboard</p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # Refresh data if requested
-    if refresh:
-        st.session_state.data_seed = random.randint(1, 10000)
-        st.rerun()
+    # Load data
+    with st.expander("📥 Data Source Configuration", expanded=st.session_state.get("df") is None):
+        data_source, df = render_data_source_selector()
+        if df is not None:
+            st.session_state.df = df
+            st.session_state.data_source = data_source
     
-    # Generate data
-    df = generate_sample_data(n_accounts=350, seed=st.session_state.data_seed)
+    # Use cached data if available
+    df = st.session_state.get("df")
+    data_source = st.session_state.get("data_source", "sample")
+    
+    if df is None:
+        st.info("👆 Please configure a data source above to get started.")
+        return
+    
+    # Sidebar
+    region, benchmarks = render_sidebar(df)
     
     # Filter by region
     if region != "All Regions":
@@ -1121,124 +1662,73 @@ def main():
     else:
         df_filtered = df.copy()
     
-    # Compute risk attribution
-    risk_data = compute_risk_attribution(df_filtered)
+    # Compute risk scores
+    df_filtered = compute_risk_scores(df_filtered, benchmarks)
+    risk_data = compute_risk_attribution(df_filtered, benchmarks)
     
-    # Main content area
-    render_header(risk_data, region)
+    # Navigation-based content
+    nav = st.session_state.get("nav_selection", "📊 Overview")
     
-    # Navigation tabs
-    tabs = st.tabs(["📊 Overview", "📈 Revenue Impact", "🎯 Benchmarking", "📋 Account Details"])
-    
-    with tabs[0]:  # Overview
-        # Risk category cards
+    if nav == "📊 Overview":
+        render_header(risk_data, region, data_source)
+        
         st.markdown("### Risk Attribution by Category")
         
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            render_risk_category_card(
-                "Product Risk",
-                risk_data["categories"]["product"],
-                "🔧"
-            )
-        
+            render_risk_category_card("Product Risk", risk_data["categories"]["product"], "🔧")
         with col2:
-            render_risk_category_card(
-                "Process Risk",
-                risk_data["categories"]["process"],
-                "⚙️"
-            )
-        
+            render_risk_category_card("Process Risk", risk_data["categories"]["process"], "⚙️")
         with col3:
-            render_risk_category_card(
-                "Development Risk",
-                risk_data["categories"]["development"],
-                "📚"
-            )
-        
+            render_risk_category_card("Development Risk", risk_data["categories"]["development"], "📚")
         with col4:
-            render_risk_category_card(
-                "Relationship Risk",
-                risk_data["categories"]["relationship"],
-                "🤝"
-            )
+            render_risk_category_card("Relationship Risk", risk_data["categories"]["relationship"], "🤝")
         
-        # Charts row
         st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
         
         chart_col1, chart_col2 = st.columns([1, 2])
-        
         with chart_col1:
             st.markdown("#### Risk Distribution")
             render_risk_distribution_chart(risk_data)
-        
         with chart_col2:
-            st.markdown("#### Risk Trend (30 Days)")
-            render_trend_chart(df_filtered)
-        
-        # Top at-risk accounts
-        st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-        st.markdown("#### 🚨 Top At-Risk Accounts")
-        render_top_accounts_table(df_filtered)
-        
-        # Add Widget button (placeholder)
-        st.markdown("<br>", unsafe_allow_html=True)
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 4])
-        with col_btn1:
-            if st.button("➕ Add Widget", use_container_width=True):
-                st.session_state.widgets.append(f"Widget {len(st.session_state.widgets) + 1}")
-                st.toast("Widget added! (Placeholder)", icon="✅")
-        with col_btn2:
-            st.button("📥 Export Data", use_container_width=True, disabled=True)
+            st.markdown("#### ARR by Risk Tier")
+            render_arr_by_risk_chart(df_filtered)
     
-    with tabs[1]:  # Revenue Impact
+    elif nav == "🤖 AI Insights":
+        render_header(risk_data, region, data_source)
+        render_ai_insights_section(df_filtered, risk_data)
+    
+    elif nav == "📈 Revenue Impact":
         st.markdown("### 💰 Revenue Impact Analysis")
         
-        # ARR by risk tier
-        arr_by_tier = df_filtered.groupby('risk_tier')['arr_value'].sum().reset_index()
-        arr_by_tier.columns = ['Risk Tier', 'ARR']
-        
-        fig = px.bar(
-            arr_by_tier, 
-            x='Risk Tier', 
-            y='ARR',
-            color='Risk Tier',
-            color_discrete_map={'Low': COLORS['accent_green'], 'Medium': COLORS['accent_orange'], 'High': COLORS['accent_red']}
-        )
-        
-        fig.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            xaxis=dict(color='#8b949e'),
-            yaxis=dict(color='#8b949e', gridcolor='rgba(255,255,255,0.05)'),
-            showlegend=False,
-            height=400
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Key metrics
-        met_col1, met_col2, met_col3, met_col4 = st.columns(4)
-        with met_col1:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total ARR", format_currency(df_filtered['arr_value'].sum()))
+        with col2:
             high_risk_arr = df_filtered[df_filtered['risk_tier'] == 'High']['arr_value'].sum()
-            st.metric("High Risk ARR", format_currency(high_risk_arr))
-        with met_col2:
+            st.metric("High Risk ARR", format_currency(high_risk_arr), delta=f"-{high_risk_arr/df_filtered['arr_value'].sum()*100:.1f}%")
+        with col3:
             med_risk_arr = df_filtered[df_filtered['risk_tier'] == 'Medium']['arr_value'].sum()
             st.metric("Medium Risk ARR", format_currency(med_risk_arr))
-        with met_col3:
+        with col4:
             low_risk_arr = df_filtered[df_filtered['risk_tier'] == 'Low']['arr_value'].sum()
-            st.metric("Low Risk ARR", format_currency(low_risk_arr))
-        with met_col4:
-            total_arr = df_filtered['arr_value'].sum()
-            st.metric("Total ARR", format_currency(total_arr))
+            st.metric("Healthy ARR", format_currency(low_risk_arr))
+        
+        st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
+        render_arr_by_risk_chart(df_filtered)
+        
+        # Regional breakdown
+        st.markdown("#### ARR by Region")
+        regional_arr = df_filtered.groupby('region')['arr_value'].sum().reset_index()
+        fig = px.pie(regional_arr, values='arr_value', names='region', hole=0.4)
+        fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=300)
+        st.plotly_chart(fig, use_container_width=True)
     
-    with tabs[2]:  # Benchmarking
+    elif nav == "🎯 Benchmarking":
         st.markdown("### 🎯 Benchmark Comparison")
         
-        # Radar chart for benchmarks
         categories_list = ['Core Adoption', 'Onboarding', 'Seat Utilization', 'Training', 'NPS', 'CSM Engagement']
-        
         actual_values = [
             df_filtered['core_module_adoption'].mean() * 100,
             df_filtered['onboarding_completion_pct'].mean() * 100,
@@ -1247,129 +1737,74 @@ def main():
             df_filtered['nps_score'].mean() * 10,
             df_filtered['csm_engagement_score'].mean() * 100
         ]
-        
-        benchmark_values = [80, 90, 75, 80, 80, 80]
+        benchmark_values = [
+            benchmarks.core_module_adoption * 100,
+            benchmarks.onboarding_completion * 100,
+            benchmarks.seat_utilization * 100,
+            80,
+            benchmarks.nps_score * 10,
+            80
+        ]
         
         fig = go.Figure()
-        
-        fig.add_trace(go.Scatterpolar(
-            r=actual_values,
-            theta=categories_list,
-            fill='toself',
-            name='Actual',
-            line_color=COLORS['accent_blue'],
-            fillcolor='rgba(84, 160, 255, 0.2)'
-        ))
-        
-        fig.add_trace(go.Scatterpolar(
-            r=benchmark_values,
-            theta=categories_list,
-            fill='toself',
-            name='Benchmark',
-            line_color=COLORS['accent_green'],
-            fillcolor='rgba(38, 222, 129, 0.1)'
-        ))
-        
+        fig.add_trace(go.Scatterpolar(r=actual_values, theta=categories_list, fill='toself', name='Actual', line_color=COLORS['accent_blue']))
+        fig.add_trace(go.Scatterpolar(r=benchmark_values, theta=categories_list, fill='toself', name='Benchmark', line_color=COLORS['accent_green']))
         fig.update_layout(
-            polar=dict(
-                radialaxis=dict(
-                    visible=True,
-                    range=[0, 100],
-                    gridcolor='rgba(255,255,255,0.1)'
-                ),
-                bgcolor='rgba(0,0,0,0)'
-            ),
+            polar=dict(radialaxis=dict(visible=True, range=[0, 100], gridcolor='rgba(255,255,255,0.1)'), bgcolor='rgba(0,0,0,0)'),
             paper_bgcolor='rgba(0,0,0,0)',
             showlegend=True,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=-0.2,
-                xanchor="center",
-                x=0.5,
-                font=dict(color='#8b949e')
-            ),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5, font=dict(color='#8b949e')),
             height=500
         )
-        
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Benchmark table
-        st.markdown("#### Detailed Benchmark Comparison")
-        benchmark_df = pd.DataFrame({
-            'Metric': categories_list,
-            'Actual': [f"{v:.1f}%" for v in actual_values],
-            'Benchmark': [f"{v}%" for v in benchmark_values],
-            'Gap': [f"{actual_values[i] - benchmark_values[i]:+.1f}%" for i in range(len(categories_list))]
-        })
-        st.dataframe(benchmark_df, use_container_width=True, hide_index=True)
     
-    with tabs[3]:  # Account Details
-        st.markdown("### 📋 Account Details")
+    elif nav == "📋 Accounts":
+        st.markdown("### 📋 Account Explorer")
         
-        # Filters
-        filter_col1, filter_col2, filter_col3 = st.columns(3)
-        with filter_col1:
-            risk_filter = st.multiselect("Risk Tier", options=["High", "Medium", "Low"], default=["High", "Medium"])
-        with filter_col2:
-            industry_filter = st.multiselect("Industry", options=df_filtered['industry'].unique().tolist())
-        with filter_col3:
-            size_filter = st.multiselect("Company Size", options=df_filtered['company_size'].unique().tolist())
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            risk_filter = st.multiselect("Risk Tier", ["High", "Medium", "Low"], default=["High", "Medium"])
+        with col2:
+            if 'industry' in df_filtered.columns:
+                industry_filter = st.multiselect("Industry", df_filtered['industry'].unique().tolist())
+            else:
+                industry_filter = []
+        with col3:
+            search = st.text_input("Search by company name", "")
         
-        # Apply filters
         display_df = df_filtered.copy()
         if risk_filter:
             display_df = display_df[display_df['risk_tier'].isin(risk_filter)]
         if industry_filter:
             display_df = display_df[display_df['industry'].isin(industry_filter)]
-        if size_filter:
-            display_df = display_df[display_df['company_size'].isin(size_filter)]
+        if search:
+            display_df = display_df[display_df['company_name'].str.contains(search, case=False, na=False)]
         
-        # Display filtered data
         st.markdown(f"**Showing {len(display_df)} accounts**")
         
-        display_cols = ['account_id', 'company_name', 'region', 'industry', 'company_size', 
-                       'arr_value', 'core_module_adoption', 'onboarding_completion_pct', 
-                       'churn_probability', 'risk_tier']
+        display_cols = ['account_id', 'company_name', 'region', 'arr_value', 'churn_probability', 'risk_tier']
+        available_cols = [c for c in display_cols if c in display_df.columns]
         
-        display_df_formatted = display_df[display_cols].copy()
-        display_df_formatted['arr_value'] = display_df_formatted['arr_value'].apply(format_currency)
-        display_df_formatted['core_module_adoption'] = (display_df_formatted['core_module_adoption'] * 100).round(0).astype(int).astype(str) + '%'
-        display_df_formatted['onboarding_completion_pct'] = (display_df_formatted['onboarding_completion_pct'] * 100).round(0).astype(int).astype(str) + '%'
-        display_df_formatted['churn_probability'] = (display_df_formatted['churn_probability'] * 100).round(0).astype(int).astype(str) + '%'
+        show_df = display_df[available_cols].copy()
+        if 'arr_value' in show_df.columns:
+            show_df['arr_value'] = show_df['arr_value'].apply(format_currency)
+        if 'churn_probability' in show_df.columns:
+            show_df['churn_probability'] = (show_df['churn_probability'] * 100).round(0).astype(int).astype(str) + '%'
         
-        display_df_formatted.columns = ['ID', 'Company', 'Region', 'Industry', 'Size', 'ARR', 
-                                        'Adoption', 'Onboarding', 'Risk %', 'Tier']
+        st.dataframe(show_df, use_container_width=True, hide_index=True, height=400)
         
-        st.dataframe(
-            display_df_formatted,
-            use_container_width=True,
-            hide_index=True,
-            height=400
-        )
-        
-        # Export button
         csv = display_df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download CSV",
-            data=csv,
-            file_name="at_risk_accounts.csv",
-            mime="text/csv"
-        )
+        st.download_button("📥 Download CSV", csv, "accounts.csv", "text/csv")
     
     # Footer
     st.markdown("""
     <div style="text-align: center; padding: 40px 0 20px 0; border-top: 1px solid #2d3139; margin-top: 40px;">
         <p style="color: #4b5563; font-size: 0.85rem;">
-            ARR Risk Attribution Dashboard • Built with Streamlit<br>
-            <span style="font-size: 0.75rem;">For demonstration purposes. Replace with real data integration.</span>
+            ChurnGuard v2.0 • AI-Powered by Claude<br>
+            <span style="font-size: 0.75rem;">Salesforce • Amplitude • Zendesk Integration Ready</span>
         </p>
     </div>
     """, unsafe_allow_html=True)
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
 
 if __name__ == "__main__":
     main()
@@ -1378,35 +1813,39 @@ if __name__ == "__main__":
 # FUTURE ENHANCEMENTS (TODO)
 # =============================================================================
 """
-ML Integration Points:
-----------------------
-1. Replace rule-based risk scoring with scikit-learn model:
-   - from sklearn.ensemble import GradientBoostingClassifier
-   - Train on historical churn data
-   - Use SHAP values for explainable attribution
-
-2. Add time-series forecasting for ARR risk:
-   - from prophet import Prophet
-   - Predict risk trends 30/60/90 days out
-
-3. Clustering for account segmentation:
-   - from sklearn.cluster import KMeans
-   - Identify risk archetypes
-
-4. Anomaly detection for early warning:
-   - from sklearn.ensemble import IsolationForest
-   - Flag accounts with unusual behavior patterns
-
-Database Integration:
---------------------
-- Connect to real customer data via SQLAlchemy
-- Implement caching with Redis
-- Add real-time updates via WebSockets
-
-Additional Features:
+Production Roadmap:
 -------------------
-- PDF report generation with ReportLab
-- Email alerts for risk threshold breaches
-- Slack/Teams integration for notifications
-- Role-based access control
+1. Multi-tenant Database
+   - PostgreSQL with SQLAlchemy ORM
+   - Row-level security per organization
+   - Connection pooling with pgbouncer
+
+2. Real OAuth Flows
+   - Salesforce OAuth 2.0 (Web Server Flow)
+   - Zendesk OAuth for enterprise customers
+   - Amplitude requires API keys only
+
+3. Background Jobs
+   - Celery + Redis for async data refresh
+   - Scheduled daily/weekly sync from APIs
+   - Webhook listeners for real-time updates
+
+4. Enhanced Security
+   - Streamlit-Authenticator with TOTP
+   - Auth0 or Okta SSO integration
+   - API key encryption at rest
+   - HTTPS enforcement (via reverse proxy)
+   - GDPR compliance: data export/deletion
+
+5. Advanced ML Features
+   - scikit-learn churn prediction model
+   - SHAP values for feature importance
+   - Time-series forecasting with Prophet
+   - Anomaly detection for early warning
+
+6. Operational Enhancements
+   - Structured logging with structlog
+   - Prometheus metrics + Grafana dashboards
+   - Sentry error tracking
+   - Rate limiting per tenant
 """

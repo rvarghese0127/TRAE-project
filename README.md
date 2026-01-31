@@ -1,144 +1,164 @@
-# ARR Risk Attribution Dashboard
+# 🛡️ ChurnGuard
 
-A production-grade Streamlit dashboard for customer churn risk attribution and root-cause analysis. Designed with a dark theme, modern SaaS aesthetics, and interactive data exploration.
+**AI-Powered ARR Risk & Retention Dashboard**
 
-![Dashboard Preview](dashboard_preview.png)
+A production-grade Streamlit dashboard that integrates Salesforce, Amplitude, and Zendesk data to identify churn risk and provides AI-powered retention recommendations using Claude.
 
-## Features
+![Dashboard Preview](docs/dashboard-preview.png)
+
+## ✨ Features
+
+### 📊 Data Ingestion
+- **Sample Data Mode**: Demo with realistic synthetic customer data
+- **CSV Upload**: Import data from exported files
+- **API Integration**: Direct connections to:
+  - **Salesforce**: Account and ARR data via SOQL
+  - **Amplitude**: Product usage and engagement metrics
+  - **Zendesk**: Support ticket analysis
 
 ### 🎯 Risk Attribution
-- **Product Risk**: Core module adoption, seat utilization, feature adoption gaps
-- **Process Risk**: Onboarding completion, login frequency, time to first value
-- **Development Risk**: Training completion, API integration depth
-- **Relationship Risk**: NPS scores, CSM engagement, support ticket health
+- **Product Risk**: Module adoption, seat utilization, feature gaps
+- **Process Risk**: Onboarding completion, login frequency, TTFV
+- **Development Risk**: Training completion, API integrations
+- **Relationship Risk**: NPS scores, CSM engagement, support health
 
-### 📊 Interactive Visualizations
-- Risk distribution donut chart
-- 30-day risk trend line chart
-- Benchmark radar comparison
-- ARR by risk tier bar charts
+### 🤖 AI-Powered Insights
+- **Claude Integration**: Deep analysis of merged customer data
+- **Pain Point Detection**: Identifies top 4-6 churn drivers
+- **Root Cause Analysis**: Evidence-based explanations
+- **Actionable Recommendations**: Prioritized retention strategies with ARR impact estimates
 
-### 🔧 Filtering & Controls
-- Region filtering (AMER, EMEA, APAC)
-- Risk tier filtering
-- Industry and company size filters
-- Adjustable benchmarks via sliders
+### 🎨 Modern UI
+- Dark theme with SaaS-grade aesthetics
+- Interactive charts and visualizations
+- Responsive card-based layout
+- Region and benchmark filtering
 
-### 📋 Account Management
-- Top at-risk accounts table
-- Detailed account explorer with export
-- CSV download functionality
+## 🚀 Quick Start
 
-## Installation
+### Local Development
 
-### Prerequisites
-- Python 3.10+
-- pip or conda
-
-### Quick Start
-
-1. **Clone or download the repository**
-
-2. **Install dependencies**
 ```bash
-pip install streamlit pandas numpy plotly
-```
+# Clone repository
+git clone https://github.com/your-username/churnguard.git
+cd churnguard
 
-3. **Run the dashboard**
-```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure secrets
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# Edit secrets.toml with your API keys
+
+# Run
 streamlit run app.py
 ```
 
-4. **Open in browser**
-Navigate to `http://localhost:8501`
+### Docker
 
-## Configuration
+```bash
+# Using docker-compose
+docker-compose up -d
 
-### Streamlit Theme
-The dark theme is configured in `.streamlit/config.toml`:
-
-```toml
-[theme]
-primaryColor = "#54a0ff"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#1a1d24"
-textColor = "#ffffff"
-font = "sans serif"
+# Or standalone
+docker build -t churnguard .
+docker run -p 8501:8501 -e ANTHROPIC_API_KEY="sk-ant-..." churnguard
 ```
 
-### Benchmark Adjustment
-Default benchmarks can be modified in the sidebar or in the code:
-
-```python
-@dataclass
-class Benchmark:
-    core_module_adoption: float = 0.80
-    onboarding_completion: float = 0.90
-    weekly_logins: int = 5
-    time_to_first_value_days: int = 14
-    seat_utilization: float = 0.75
-    support_tickets_threshold: int = 3
-    nps_score: float = 8.0
-```
-
-## Data Generation
-
-The dashboard uses synthetic data for demonstration. To connect to real data:
-
-1. Replace `generate_sample_data()` with your data source
-2. Ensure your DataFrame has the required columns:
-   - `account_id`, `company_name`, `region`
-   - `arr_value`, `core_module_adoption`
-   - `onboarding_completion_pct`, `weekly_logins`
-   - `time_to_first_value_days`, `seat_utilization_pct`
-   - `support_tickets_last_quarter`, `nps_score`
-   - `csm_engagement_score`, `training_completion_pct`
-
-## Future Enhancements
-
-### ML Integration Points
-- Replace rule-based scoring with GradientBoostingClassifier
-- Add SHAP values for explainable risk attribution
-- Implement Prophet for ARR risk forecasting
-- Use IsolationForest for anomaly detection
-
-### Production Features
-- Database integration (PostgreSQL, Snowflake)
-- Redis caching for performance
-- PDF report generation
-- Slack/Teams notifications
-- Role-based access control
-
-## Project Structure
+## 📦 Project Structure
 
 ```
-.
-├── app.py                  # Main Streamlit application
+churnguard/
+├── app.py                 # Main Streamlit application
+├── requirements.txt       # Python dependencies
+├── Dockerfile            # Container configuration
+├── docker-compose.yml    # Docker Compose setup
+├── render.yaml           # Render.com deployment
+├── DEPLOYMENT.md         # Deployment guide
 ├── .streamlit/
-│   └── config.toml         # Streamlit configuration
-├── README.md               # This file
-└── requirements.txt        # Python dependencies
+│   ├── config.toml       # Streamlit theme config
+│   └── secrets.toml.example  # Secrets template
+└── .gitignore
 ```
 
-## Requirements
+## 🔧 Configuration
 
-```
-streamlit>=1.28.0
-pandas>=2.0.0
-numpy>=1.24.0
-plotly>=5.17.0
-```
+### Environment Variables
 
-## License
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `ANTHROPIC_API_KEY` | Claude API key for AI insights | Yes (for AI features) |
+| `APP_PASSWORD` | Dashboard access password | No (default: churnguard2024) |
 
-MIT License - Feel free to use and modify for your own projects.
+### Benchmark Defaults
 
-## Contributing
+Configure in sidebar or modify in code:
+
+| Metric | Default | Description |
+|--------|---------|-------------|
+| Core Module Adoption | 80% | Target adoption rate |
+| Onboarding Completion | 90% | Target completion rate |
+| Weekly Logins | 5 | Expected logins per week |
+| Time to First Value | 14 days | Max acceptable TTFV |
+| Seat Utilization | 75% | Target utilization |
+| NPS Score | 8.0 | Target NPS |
+
+## 🌐 Deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed instructions on:
+
+- Streamlit Community Cloud (free, fastest)
+- Render.com (custom domain, free tier)
+- AWS App Runner / EC2 (production-grade)
+- Docker self-hosting
+
+### Quick Deploy to Render
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+## 🔒 Security
+
+- Simple password authentication (production: use OAuth/SSO)
+- Secrets stored in environment variables
+- Data processed in-memory only (not persisted)
+- HTTPS recommended for all deployments
+
+For production deployments, consider:
+- Streamlit-Authenticator or Auth0 integration
+- AWS Secrets Manager for credentials
+- VPC/firewall restrictions
+- GDPR compliance measures
+
+## 🛣️ Roadmap
+
+- [ ] Multi-tenant database (PostgreSQL)
+- [ ] Real OAuth flows for integrations
+- [ ] Background data sync with Celery
+- [ ] ML-based churn prediction model
+- [ ] SHAP values for explainability
+- [ ] Email/Slack alerting
+- [ ] Role-based access control
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Submit a pull request
+3. Make your changes
+4. Submit a pull request
+
+## 📞 Support
+
+- GitHub Issues: Bug reports and feature requests
+- Documentation: [docs/](docs/)
 
 ---
 
-Built with ❤️ using Streamlit
+Built with ❤️ using Streamlit and Claude AI
